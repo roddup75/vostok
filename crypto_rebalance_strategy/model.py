@@ -14,7 +14,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .config import StrategyConfig
-from diffusion_tf.tabular_ddpm import ConditionalTabularDDPMRegressor
+from .ddpm import ConditionalTabularDDPMRegressor
 
 
 MODEL_LABELS = {
