@@ -31,9 +31,20 @@ def _select_rebalance_dates(feature_df: pd.DataFrame, frequency: str) -> List[pd
 
 def _build_weights(test_slice: pd.DataFrame, config: StrategyConfig) -> pd.Series:
     ranked = test_slice.sort_values("prediction", ascending=False)
+    weights = pd.Series(0.0, index=test_slice["asset"])
+
+    if config.asset_class == "equity":
+        side_count = max(1, int(len(ranked) * config.equity_long_short_quantile))
+        longs = ranked.head(side_count)
+        shorts = ranked.tail(side_count)
+        if not longs.empty:
+            weights.loc[longs["asset"]] = config.gross_leverage / 2.0 / len(longs)
+        if not shorts.empty:
+            weights.loc[shorts["asset"]] = -config.gross_leverage / 2.0 / len(shorts)
+        return weights
+
     longs = ranked.head(config.top_n).copy()
     shorts = ranked.tail(config.bottom_n).copy()
-    weights = pd.Series(0.0, index=test_slice["asset"])
 
     def _scaled_side(df: pd.DataFrame, sign: float) -> pd.Series:
         if df.empty:
@@ -75,6 +86,12 @@ def _build_weights(test_slice: pd.DataFrame, config: StrategyConfig) -> pd.Serie
 def _select_refit_dates(feature_df: pd.DataFrame) -> set[pd.Timestamp]:
     by_date = feature_df[["date"]].drop_duplicates().sort_values("date").set_index("date")
     return set(pd.Timestamp(x) for x in by_date.resample("M").last().dropna().index.tolist())
+
+
+def _select_model_refit_dates(feature_df: pd.DataFrame, config: StrategyConfig) -> set[pd.Timestamp]:
+    by_date = feature_df[["date"]].drop_duplicates().sort_values("date").set_index("date")
+    frequency = "Q" if config.model_refit_frequency == "Q" else "M"
+    return set(pd.Timestamp(x) for x in by_date.resample(frequency).last().dropna().index.tolist())
 
 
 def _information_coefficient(predictions: pd.DataFrame, method: str) -> float:
@@ -122,11 +139,12 @@ def _run_single_model_backtest(
 ) -> BacktestArtifacts:
     feature_cols = get_feature_columns(config)
     rebalance_dates = _select_rebalance_dates(feature_df, config.rebalance_frequency)
-    refit_dates = _select_refit_dates(feature_df)
+    refit_dates = _select_model_refit_dates(feature_df, config)
     prediction_rows: List[pd.DataFrame] = []
     portfolio_rows: List[Dict[str, object]] = []
     parameter_rows: List[pd.DataFrame] = []
-    turnover_prev = pd.Series(0.0, index=config.universe_list)
+    asset_universe = sorted(feature_df["asset"].drop_duplicates().tolist())
+    turnover_prev = pd.Series(0.0, index=asset_universe)
     search_types: List[str] = []
     params_history: List[Dict[str, float]] = []
     fit = None
@@ -147,7 +165,11 @@ def _run_single_model_backtest(
             fit = fit_model(model_name=model_name, train_df=train_df, X_cols=feature_cols, config=config)
             search_types.append(fit.search_type)
             params_history.append({k: float(v) for k, v in fit.best_params.items()})
-            parameter_df = extract_parameter_vector(fit.best_estimator, model_name=model_name, feature_names=feature_cols)
+            parameter_df = extract_parameter_vector(
+                fit.best_estimator,
+                model_name=model_name,
+                feature_names=fit.feature_names,
+            )
             parameter_df["date"] = rebalance_date
             parameter_df["model_name"] = model_name
             parameter_df["model_label"] = MODEL_LABELS[model_name]
@@ -158,7 +180,7 @@ def _run_single_model_backtest(
         if fit is None:
             continue
 
-        _, pred_df = predict_cross_section(fit.best_estimator, test_df, feature_cols)
+        _, pred_df = predict_cross_section(fit.best_estimator, test_df, fit.feature_names)
         weights = _build_weights(pred_df, config)
         pred_df["model_name"] = model_name
         pred_df["model_label"] = MODEL_LABELS[model_name]
@@ -168,7 +190,7 @@ def _run_single_model_backtest(
         prediction_rows.append(pred_df)
 
         realized_gross = float((pred_df["weight"] * pred_df["target_return"]).sum())
-        current_weights = weights.reindex(config.universe_list).fillna(0.0)
+        current_weights = weights.reindex(asset_universe).fillna(0.0)
         turnover = float((current_weights - turnover_prev).abs().sum())
         trading_cost = turnover * (config.transaction_cost_bps / 10000.0)
         net_return = realized_gross - trading_cost
@@ -183,6 +205,9 @@ def _run_single_model_backtest(
                 "net_return": net_return,
                 "n_longs": int((current_weights > 0).sum()),
                 "n_shorts": int((current_weights < 0).sum()),
+                "market_forward_return": float(pred_df["market_forward_return"].mean())
+                if "market_forward_return" in pred_df.columns
+                else np.nan,
                 "model_search_type": fit.search_type,
             }
         )
@@ -211,6 +236,8 @@ def _run_single_model_backtest(
         "backtest_observations": int(len(portfolio_returns)),
         "prediction_observations": int(len(predictions)),
         "model_refits": int(len(params_history)),
+        "latest_feature_count": int(len(fit.feature_names)) if fit is not None else 0,
+        "latest_features": list(fit.feature_names) if fit is not None else [],
         "avg_turnover": float(portfolio_returns["turnover"].mean()),
         "avg_trading_cost": float(portfolio_returns["trading_cost"].mean()),
         "avg_cross_sectional_r2": float(cross_sectional_diagnostics["cross_sectional_r2"].mean()),
@@ -261,8 +288,10 @@ def run_backtest(feature_df: pd.DataFrame, config: StrategyConfig) -> BacktestAr
         ignore_index=True,
     )
     models_summary = {model_name: artifact.summary_metrics for model_name, artifact in model_artifacts.items()}
+    config_summary = asdict(config)
+    config_summary["universe"] = sorted(feature_df["asset"].drop_duplicates().tolist())
     summary = {
-        "config": asdict(config),
+        "config": config_summary,
         "models": models_summary,
         "comparison": _build_comparison(models_summary),
     }

@@ -135,3 +135,5 @@ crypto_rebalance_strategy/**/.DS_Store
 crypto_rebalance_strategy/**/*.aux
 crypto_rebalance_strategy/**/*.log
 crypto_rebalance_strategy/missfont.log
+crypto_rebalance_strategy/equity_data/**/synthetic_factor_panel_1000_stocks_30_years.parquet
+crypto_rebalance_strategy/equity_data/**/equity_model_panel_1000_stocks_30_years.parquet

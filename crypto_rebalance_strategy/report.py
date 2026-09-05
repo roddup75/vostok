@@ -19,7 +19,7 @@ LATEX_TEMPLATE = r"""
 \usepackage{float}
 \usepackage{longtable}
 \usepackage{amsmath}
-\title{Crypto Strategy Model Comparison Report}
+\title{Cross-Asset Strategy Model Comparison Report}
 \date{}
 \begin{document}
 \maketitle
@@ -221,6 +221,61 @@ def create_plots(
     plt.savefig(plots_dir / "cross_sectional_r2.png", dpi=180)
     plt.close()
 
+    forecast_matrix = predictions.pivot_table(
+        index=["date", "asset"],
+        columns="model_label",
+        values="prediction",
+        aggfunc="first",
+    )
+    model_pairs = [
+        ("Elastic Net", "XGBoost"),
+        ("Elastic Net", "DDPM"),
+        ("DDPM", "XGBoost"),
+    ]
+    pairwise_rows = []
+    for date, date_matrix in forecast_matrix.groupby(level="date"):
+        date_matrix = date_matrix.droplevel("date")
+        for left_model, right_model in model_pairs:
+            model_pair = f"{left_model} vs {right_model}"
+            if left_model not in date_matrix.columns or right_model not in date_matrix.columns:
+                pairwise_rows.append({"date": date, "model_pair": model_pair, "correlation": float("nan")})
+                continue
+            pair = date_matrix[[left_model, right_model]].dropna()
+            if len(pair) < 2 or pair[left_model].nunique() < 2 or pair[right_model].nunique() < 2:
+                pairwise_rows.append({"date": date, "model_pair": model_pair, "correlation": float("nan")})
+                continue
+            pairwise_rows.append(
+                {
+                    "date": date,
+                    "model_pair": model_pair,
+                    "correlation": pair[left_model].corr(pair[right_model]),
+                }
+            )
+    pairwise_correlations = pd.DataFrame(pairwise_rows)
+    if not pairwise_correlations.empty:
+        pairwise_correlation_frame = pairwise_correlations.pivot(
+            index="date",
+            columns="model_pair",
+            values="correlation",
+        ).sort_index()
+        plt.figure(figsize=(10, 5))
+        for left_model, right_model in model_pairs:
+            model_pair = f"{left_model} vs {right_model}"
+            if model_pair in pairwise_correlation_frame.columns:
+                plt.plot(
+                    pairwise_correlation_frame.index,
+                    pairwise_correlation_frame[model_pair],
+                    linewidth=1.8,
+                    label=model_pair,
+                )
+        plt.axhline(0.0, color="black", linewidth=1)
+        plt.title("Cross-Sectional Correlation Between Model Forecasts")
+        plt.ylabel("Forecast Correlation")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(plots_dir / "cross_sectional_forecast_correlation.png", dpi=180)
+        plt.close()
+
     for model_name in parameter_history["model_name"].drop_duplicates().tolist():
         top_features = _select_top_features(parameter_history, model_name=model_name, top_n=12)
         if not top_features:
@@ -263,6 +318,10 @@ def write_latex_report(
         {"filename": "drawdown.png", "caption": "Drawdown comparison"},
         {"filename": "prediction_scatter.png", "caption": "Predicted versus realized forward returns by model"},
         {"filename": "cross_sectional_r2.png", "caption": "Cross-sectional R2 stability over time"},
+        {
+            "filename": "cross_sectional_forecast_correlation.png",
+            "caption": "Pairwise cross-sectional correlation between model forecasts over time",
+        },
     ]
     for model_name in model_names:
         model_sections.append(

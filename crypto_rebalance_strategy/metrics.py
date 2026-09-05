@@ -10,6 +10,10 @@ def _annualization_factor(index: pd.Series) -> float:
     inferred = pd.infer_freq(index)
     if inferred in {"D", "B"}:
         return 365.0
+    if inferred in {"M", "ME", "MS", "BM", "BME", "BMS"}:
+        return 12.0
+    if inferred in {"Q", "QE", "QS", "BQ", "BQE", "BQS"}:
+        return 4.0
     return 365.0
 
 

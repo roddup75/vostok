@@ -12,10 +12,8 @@ from jinja2 import Template
 
 METHODOLOGY_TEMPLATE = r"""
 \documentclass[11pt]{article}
-\usepackage[margin=0.8in]{geometry}
+\usepackage[margin=0.82in]{geometry}
 \usepackage{booktabs}
-\usepackage{graphicx}
-\usepackage{float}
 \usepackage{longtable}
 \usepackage{amsmath}
 \title{Crypto Cross-Sectional Forecasting Methodology}
@@ -23,91 +21,93 @@ METHODOLOGY_TEMPLATE = r"""
 \date{ {{ report_date }} }
 \begin{document}
 \maketitle
-\section*{Objective}
-Build a cross-sectional long/short crypto strategy that forecasts forward returns for a liquid multi-asset universe and compares three model classes: Elastic Net, XGBoost, and a conditional denoising diffusion probabilistic model (DDPM). The workflow is fully walk-forward: features are measured at date $t$, the target is a forward return over the selected horizon, and the portfolio is formed only from the information available at the rebalance date.
 
-\section*{Data, Universe, and Labels}
+\begin{abstract}
+This report documents a walk-forward cross-sectional crypto forecasting system using real daily OHLCV data, technical predictors, beta-adjusted residual return labels, and three forecasting models: Elastic Net, XGBoost, and a conditional denoising diffusion probabilistic model (DDPM). The design objective is not point prediction alone; it is ranking quality that can support a market-neutral long/short portfolio under transaction costs and beta constraints.
+\end{abstract}
+
+\section*{1. Research Design}
+At each rebalance date $t$, the system estimates a function $f_t(X_{i,t})$ for each asset $i$ and trades on the cross-sectional ranking of forecasts. The backtest is strictly walk-forward: model fitting uses only observations available before $t$, refits occur monthly, and portfolio weights are formed from contemporaneous features and out-of-sample forecasts.
+
+\section*{2. Data and Label Construction}
 \begin{itemize}
-\item Universe size: {{ universe_count }} large-cap crypto assets.
+\item Data source: cached Binance daily spot OHLCV files loaded through the local real-data path.
+\item Universe: {{ universe_count }} liquid crypto assets.
 \item Sample window: {{ start_date }} to {{ end_date }}.
-\item Rebalance frequency: every {{ rebalance_frequency }}.
-\item Forecast horizon: {{ horizon }} trading days ahead.
-\item Estimation window: rolling {{ train_window_months }}-month training sample with monthly model refits.
-\item Target definition: asset forward return minus a BTC/ETH beta-adjusted benchmark component, so the model focuses more on idiosyncratic cross-sectional variation.
+\item Forecast horizon: {{ horizon }} days; rebalance frequency: {{ rebalance_frequency }}.
+\item Training window: rolling {{ train_window_months }} months, with a minimum of {{ min_train_samples }} samples.
 \end{itemize}
-
-\section*{Feature Engineering}
-For each asset-date pair, the feature matrix $X_t$ combines technical signals across multiple windows:
-\begin{itemize}
-\item returns and momentum z-scores,
-\item range position, breakout scores, EWMAs, RSI, and Elliott-wave-style oscillator proxy,
-\item volatility, ATR-style range scaling, abnormal volume, and dollar-volume z-scores,
-\item lagged BTC and ETH daily and weekly returns,
-\item rolling BTC and ETH betas and an asset volatility estimate used later for sizing.
-\end{itemize}
-To stabilize cross-sectional learning, asset-specific predictors are transformed date by date using rank normalization followed by the inverse normal map. This preserves ordering while reducing the influence of outliers and heterogeneous scales across coins.
-
-\section*{Walk-Forward Backtest}
-At each rebalance date:
-\begin{enumerate}
-\item build the rolling training set from the prior {{ train_window_months }} months;
-\item refit each model only on scheduled monthly update dates;
-\item generate one-step cross-sectional forecasts for all assets in the universe;
-\item rank forecasts and trade the top {{ top_n }} longs versus bottom {{ bottom_n }} shorts;
-\item scale positions by forecast strength divided by recent asset volatility;
-\item project the portfolio to be neutral to cash, BTC beta, and ETH beta.
-\end{enumerate}
-Performance is measured with prediction statistics (MSE, RMSE, MAE, bias, correlation, information coefficient, and $R^2$) and trading statistics (annualized return, volatility, Sharpe, Sortino, hit ratio, drawdown, turnover, and trading cost).
-
-\section*{Competing Models}
-\textbf{Elastic Net.} A linear benchmark with L1/L2 shrinkage. It is useful when the signal is diffuse across many correlated predictors and when coefficient stability matters.
-
-\textbf{XGBoost.} A nonlinear tree ensemble benchmark. It captures threshold effects, interactions, and asymmetric response patterns in the predictor set.
-
-\textbf{Conditional DDPM.} The diffusion model is used as a conditional regressor for $y \mid X$, not as an unconditional generator. The implementation proceeds in two layers:
-\begin{enumerate}
-\item A ridge-style linear baseline first maps $X$ into a coarse forecast $\hat{y}^{\text{lin}}$.
-\item The DDPM models the residual $r = y - \hat{y}^{\text{lin}}$ by gradually adding Gaussian noise in a forward process and learning a denoiser that removes that noise conditional on $X$ and the diffusion step index.
-\end{enumerate}
-The denoiser is a compact MLP with sinusoidal timestep embeddings. At inference time, multiple reverse-diffusion paths are sampled and averaged, then added back to the linear baseline. This design makes the diffusion model focus on nonlinear residual structure instead of relearning the entire level of the target.
-
-In notation, if $r_0$ is the scaled residual, the forward process is
+The raw label is the future asset return over the forecast horizon. To reduce common market exposure, the implemented target subtracts a BTC/ETH beta-adjusted benchmark component:
 \[
-q(r_t \mid r_{t-1}) = \mathcal{N}(\sqrt{1-\beta_t}r_{t-1}, \beta_t I),
+y_{i,t} = R_{i,t:t+h} - \frac{1}{2}\left(\beta^{BTC}_{i,t}R^{BTC}_{t:t+h} + \beta^{ETH}_{i,t}R^{ETH}_{t:t+h}\right).
 \]
-and the network is trained to predict the injected noise $\epsilon$ from $(X, r_t, t)$. The reverse process then iteratively reconstructs an estimate of $r_0$, whose Monte Carlo mean becomes the residual forecast.
+This makes the supervised problem closer to idiosyncratic cross-sectional return forecasting than broad market direction forecasting.
 
-\section*{Reduced Benchmark Snapshot}
+\section*{3. Technical Feature Set}
+The feature matrix combines trend, reversal, volatility, volume, and market-state information across multiple horizons. Asset-specific predictors include simple returns, momentum z-scores, range position, breakout distance, EWMA gaps, price-to-EWMA ratios, RSI, abnormal volume, dollar-volume z-scores, realized volatility, ATR-style range measures, intraday reversal, overnight gap, high-low spread, and an Elliott-wave-style oscillator proxy. Shared market features include lagged BTC and ETH daily and weekly returns, rolling BTC/ETH betas, and recent asset volatility.
+
+Before modelling, most asset-specific predictors are transformed date by date using cross-sectional rank normalization followed by an inverse-normal map. This preserves the ordering information needed for ranking while limiting the impact of heterogeneous scales, listing histories, and crypto-specific outliers.
+
+\section*{4. Model Selection Objective}
+The current model-selection objective is cross-sectional Spearman information coefficient (IC), not mean-squared error. For each validation fold, forecasts are grouped by date and scored by their same-date rank correlation with realized target returns. The fold score is the average valid date-level IC. This better matches the portfolio construction problem, because the strategy trades ranks rather than calibrated return magnitudes.
+
+Hyperparameter search uses Bayesian optimization when \texttt{scikit-optimize} is installed and otherwise falls back to randomized search. The current run used {{ search_type }}.
+
+\section*{5. Model Specifications}
+\textbf{Elastic Net.} Elastic Net is the linear benchmark, combining L1 and L2 shrinkage. Because the technical feature set is broad and correlated, Elastic Net now includes train-window-only feature pruning before model search. Each feature is ranked by historical cross-sectional Spearman IC, then redundant predictors are removed using a Spearman correlation threshold of {{ elastic_corr_threshold }}. The default selected set is capped at {{ elastic_max_features }} features, with a floor of {{ elastic_min_features }}.
+
+\textbf{XGBoost.} XGBoost provides the nonlinear tree benchmark. It is included to capture threshold effects, interactions among technical signals, and nonlinear responses that a linear shrinkage model cannot express.
+
+\textbf{Conditional DDPM.} The DDPM is implemented as a conditional residual regressor. A ridge-style linear head first estimates a baseline forecast $\hat{y}^{lin}$, then a compact denoising MLP models the residual $r = y - \hat{y}^{lin}$. The forward diffusion process adds Gaussian noise to scaled residuals, and the network learns to predict that noise conditional on $(X, r_t, t)$. At inference, multiple reverse-diffusion paths are averaged and added back to the linear baseline. The ridge head now uses adaptive regularization and a least-squares fallback to avoid singular-matrix failures in small or collinear training folds.
+
+\section*{6. Portfolio Construction and Diagnostics}
+At each rebalance date, forecasts are ranked cross-sectionally. The strategy buys the top {{ top_n }} assets and shorts the bottom {{ bottom_n }} assets. Position size is proportional to forecast strength divided by recent volatility, then projected to be neutral to cash, BTC beta, and ETH beta. Transaction costs are applied through turnover.
+
+Diagnostics include global prediction metrics, date-level cross-sectional $R^2$, Pearson IC, Spearman IC, parameter or feature-importance paths, drawdowns, NAV curves, and pairwise forecast correlations between Elastic Net, XGBoost, and DDPM. The pairwise correlation plot is useful because strong model agreement can indicate redundant signals, while disagreement identifies dates where ensemble or model-selection logic may matter.
+
+\section*{7. Empirical Snapshot}
 \begin{center}
 \begin{tabular}{lrrr}
 \toprule
 Metric & Elastic Net & XGBoost & DDPM \\
 \midrule
+Features Used & {{ features_elastic }} & {{ features_xgboost }} & {{ features_ddpm }} \\
 MSE & {{ mse_elastic }} & {{ mse_xgboost }} & {{ mse_ddpm }} \\
-IC (Pearson) & {{ ic_elastic }} & {{ ic_xgboost }} & {{ ic_ddpm }} \\
+Spearman IC & {{ sic_elastic }} & {{ sic_xgboost }} & {{ sic_ddpm }} \\
+Pearson IC & {{ ic_elastic }} & {{ ic_xgboost }} & {{ ic_ddpm }} \\
 $R^2$ & {{ r2_elastic }} & {{ r2_xgboost }} & {{ r2_ddpm }} \\
 Ann.\ Return & {{ ret_elastic }} & {{ ret_xgboost }} & {{ ret_ddpm }} \\
+Ann.\ Volatility & {{ vol_elastic }} & {{ vol_xgboost }} & {{ vol_ddpm }} \\
 Sharpe & {{ sharpe_elastic }} & {{ sharpe_xgboost }} & {{ sharpe_ddpm }} \\
 Max Drawdown & {{ dd_elastic }} & {{ dd_xgboost }} & {{ dd_ddpm }} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-On this reduced walk-forward run, XGBoost remains the strongest benchmark. The DDPM improves on Elastic Net in portfolio return and drawdown, but it still trails XGBoost and does not yet outperform the simpler benchmarks consistently on forecast quality. The result is still informative: the diffusion model is viable in this framework, and the residual-DDPM formulation is a more appropriate starting point than a raw unconditional generative setup.
+In the latest real-data run, XGBoost remains the strongest economic benchmark. Elastic Net feature pruning materially improved portfolio return relative to the unpruned IC-optimized run, but its drawdown remains large and its average IC declined. DDPM became numerically more stable and improved versus its earlier MSE-tuned version, but it still does not dominate the simpler alternatives.
 
-\section*{Interpretation and Next Steps}
-\begin{itemize}
-\item Negative $R^2$ is possible and means the model underperforms a simple mean benchmark on the evaluation sample.
-\item The current DDPM is intentionally compact to keep monthly refits tractable inside a walk-forward backtest.
-\item The most promising next upgrades are real exchange-sourced OHLCV data, richer market-state conditioning, and direct training on ranking or portfolio-aware objectives rather than pure squared error.
-\end{itemize}
+\section*{8. Limitations and Next Work}
+The results should be read as research evidence, not production trading guidance. The universe has changing listing histories, daily bars omit intraday liquidity and funding information, and transaction costs are simplified. The next defensible additions are turnover-aware portfolio construction, conviction thresholds for weak Elastic Net ranks, feature-stability constraints across refits, and model ensembling based on rolling validation IC.
 
 \end{document}
 """
 
 
-def _fmt(value: float) -> str:
-    return f"{value:.4f}"
+def _fmt(value: object) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _feature_count(model_summary: Dict[str, object], fallback: int) -> str:
+    return str(model_summary.get("latest_feature_count") or fallback)
+
+
+def _latex_escape(value: object) -> str:
+    return str(value).replace("_", r"\_")
 
 
 def write_methodology_report(summary_metrics: Dict[str, object], output_dir: str | Path) -> Path:
@@ -115,20 +115,39 @@ def write_methodology_report(summary_metrics: Dict[str, object], output_dir: str
     report_dir = output_dir / "report"
     report_dir.mkdir(parents=True, exist_ok=True)
     models = summary_metrics["models"]
+    config = summary_metrics["config"]
+    feature_count = len(config["feature_windows"]) * 4
+    feature_count += len(config["ewma_windows"]) * 2
+    feature_count += len(config["rsi_windows"])
+    feature_count += len(config["breakout_windows"]) * 2
+    feature_count += len(config["volume_windows"]) * 2
+    feature_count += len(config["volatility_windows"]) * 2
+    feature_count += 15
     template = Template(METHODOLOGY_TEMPLATE)
     tex = template.render(
         report_date=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        universe_count=len(summary_metrics["config"]["universe"]),
-        start_date=summary_metrics["config"]["start_date"],
-        end_date=summary_metrics["config"]["end_date"],
-        rebalance_frequency=summary_metrics["config"]["rebalance_frequency"],
-        horizon=summary_metrics["config"]["horizon"],
-        train_window_months=summary_metrics["config"]["train_window_months"],
-        top_n=summary_metrics["config"]["top_n"],
-        bottom_n=summary_metrics["config"]["bottom_n"],
+        universe_count=len(config["universe"]),
+        start_date=config["start_date"],
+        end_date=config["end_date"],
+        rebalance_frequency=config["rebalance_frequency"],
+        horizon=config["horizon"],
+        train_window_months=config["train_window_months"],
+        min_train_samples=config["min_train_samples"],
+        top_n=config["top_n"],
+        bottom_n=config["bottom_n"],
+        elastic_max_features=config.get("elastic_net_max_features", "n/a"),
+        elastic_min_features=config.get("elastic_net_min_features", "n/a"),
+        elastic_corr_threshold=_fmt(config.get("elastic_net_feature_corr_threshold", "n/a")),
+        search_type=_latex_escape(", ".join(models["elastic_net"].get("search_types_used", [])) or "n/a"),
+        features_elastic=_feature_count(models["elastic_net"], feature_count),
+        features_xgboost=_feature_count(models["xgboost"], feature_count),
+        features_ddpm=_feature_count(models["ddpm"], feature_count),
         mse_elastic=_fmt(models["elastic_net"]["prediction_metrics"]["mse"]),
         mse_xgboost=_fmt(models["xgboost"]["prediction_metrics"]["mse"]),
         mse_ddpm=_fmt(models["ddpm"]["prediction_metrics"]["mse"]),
+        sic_elastic=_fmt(models["elastic_net"]["prediction_metrics"]["information_coefficient_spearman"]),
+        sic_xgboost=_fmt(models["xgboost"]["prediction_metrics"]["information_coefficient_spearman"]),
+        sic_ddpm=_fmt(models["ddpm"]["prediction_metrics"]["information_coefficient_spearman"]),
         ic_elastic=_fmt(models["elastic_net"]["prediction_metrics"]["information_coefficient_pearson"]),
         ic_xgboost=_fmt(models["xgboost"]["prediction_metrics"]["information_coefficient_pearson"]),
         ic_ddpm=_fmt(models["ddpm"]["prediction_metrics"]["information_coefficient_pearson"]),
@@ -138,6 +157,9 @@ def write_methodology_report(summary_metrics: Dict[str, object], output_dir: str
         ret_elastic=_fmt(models["elastic_net"]["portfolio_metrics"]["annualized_return"]),
         ret_xgboost=_fmt(models["xgboost"]["portfolio_metrics"]["annualized_return"]),
         ret_ddpm=_fmt(models["ddpm"]["portfolio_metrics"]["annualized_return"]),
+        vol_elastic=_fmt(models["elastic_net"]["portfolio_metrics"]["annualized_volatility"]),
+        vol_xgboost=_fmt(models["xgboost"]["portfolio_metrics"]["annualized_volatility"]),
+        vol_ddpm=_fmt(models["ddpm"]["portfolio_metrics"]["annualized_volatility"]),
         sharpe_elastic=_fmt(models["elastic_net"]["portfolio_metrics"]["sharpe_ratio"]),
         sharpe_xgboost=_fmt(models["xgboost"]["portfolio_metrics"]["sharpe_ratio"]),
         sharpe_ddpm=_fmt(models["ddpm"]["portfolio_metrics"]["sharpe_ratio"]),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,7 @@ class ModelFitResult:
     search_type: str
     cv_score: float
     model_name: str
+    feature_names: list[str]
 
 
 def _make_elastic_pipeline(config: StrategyConfig) -> Pipeline:
@@ -178,6 +179,94 @@ def _search_space_randomized(model_name: str) -> Dict[str, Any]:
     raise ValueError(f"Unsupported model_name: {model_name}")
 
 
+def _make_cross_sectional_ic_scorer(train_df: pd.DataFrame) -> Callable[[Any, pd.DataFrame, pd.Series], float]:
+    dates_by_index = train_df["date"]
+
+    def _score(estimator: Any, X: pd.DataFrame, y: pd.Series) -> float:
+        predictions = estimator.predict(X)
+        if hasattr(X, "index"):
+            dates = dates_by_index.reindex(X.index).to_numpy()
+        else:
+            dates = dates_by_index.iloc[: len(y)].to_numpy()
+        score_frame = pd.DataFrame(
+            {
+                "date": dates,
+                "actual": np.asarray(y, dtype=float),
+                "prediction": np.asarray(predictions, dtype=float),
+            }
+        ).dropna()
+        per_date_scores = []
+        for _, group in score_frame.groupby("date"):
+            if group["actual"].nunique() < 2 or group["prediction"].nunique() < 2:
+                continue
+            value = group["prediction"].corr(group["actual"], method="spearman")
+            if pd.notna(value):
+                per_date_scores.append(float(value))
+        if not per_date_scores:
+            return -1.0
+        return float(np.mean(per_date_scores))
+
+    return _score
+
+
+def _feature_cross_sectional_ic(train_df: pd.DataFrame, feature_name: str) -> tuple[float, int]:
+    per_date_scores = []
+    for _, group in train_df[["date", feature_name, "target_return"]].dropna().groupby("date"):
+        if group[feature_name].nunique() < 2 or group["target_return"].nunique() < 2:
+            continue
+        value = group[feature_name].corr(group["target_return"], method="spearman")
+        if pd.notna(value):
+            per_date_scores.append(float(value))
+    if not per_date_scores:
+        return 0.0, 0
+    return float(np.mean(per_date_scores)), len(per_date_scores)
+
+
+def _select_elastic_net_features(train_df: pd.DataFrame, X_cols: list[str], config: StrategyConfig) -> list[str]:
+    if not config.elastic_net_feature_pruning or len(X_cols) <= config.elastic_net_max_features:
+        return X_cols
+
+    scored_features = []
+    for feature_name in X_cols:
+        mean_ic, valid_dates = _feature_cross_sectional_ic(train_df, feature_name)
+        scored_features.append(
+            {
+                "feature": feature_name,
+                "abs_mean_ic": abs(mean_ic),
+                "valid_dates": valid_dates,
+            }
+        )
+    score_frame = pd.DataFrame(scored_features).sort_values(
+        ["valid_dates", "abs_mean_ic"],
+        ascending=[False, False],
+    )
+    eligible = score_frame.loc[score_frame["valid_dates"] >= config.elastic_net_min_feature_dates].copy()
+    if len(eligible) < config.elastic_net_min_features:
+        eligible = score_frame.copy()
+    ranked_features = eligible.sort_values("abs_mean_ic", ascending=False)["feature"].tolist()
+
+    selected_features: list[str] = []
+    corr_frame = train_df[X_cols].corr(method="spearman").abs()
+    for feature_name in ranked_features:
+        if len(selected_features) >= config.elastic_net_max_features:
+            break
+        if not selected_features:
+            selected_features.append(feature_name)
+            continue
+        max_corr = corr_frame.loc[feature_name, selected_features].max()
+        if pd.isna(max_corr) or max_corr < config.elastic_net_feature_corr_threshold:
+            selected_features.append(feature_name)
+
+    if len(selected_features) < config.elastic_net_min_features:
+        for feature_name in ranked_features:
+            if len(selected_features) >= config.elastic_net_min_features:
+                break
+            if feature_name not in selected_features:
+                selected_features.append(feature_name)
+
+    return selected_features
+
+
 def _run_skopt_search(
     model_name: str,
     estimator: Any,
@@ -185,6 +274,7 @@ def _run_skopt_search(
     y: pd.Series,
     config: StrategyConfig,
     cv: TimeSeriesSplit,
+    scoring: Callable[[Any, pd.DataFrame, pd.Series], float],
 ) -> ModelFitResult:
     from skopt import BayesSearchCV
 
@@ -194,7 +284,7 @@ def _run_skopt_search(
         n_iter=config.bayes_iter,
         cv=cv,
         n_jobs=1,
-        scoring="neg_mean_squared_error",
+        scoring=scoring,
         random_state=config.random_state,
         refit=True,
     )
@@ -205,6 +295,7 @@ def _run_skopt_search(
         search_type="bayesian",
         cv_score=float(search.best_score_),
         model_name=model_name,
+        feature_names=list(X.columns),
     )
 
 
@@ -215,6 +306,7 @@ def _run_random_search(
     y: pd.Series,
     config: StrategyConfig,
     cv: TimeSeriesSplit,
+    scoring: Callable[[Any, pd.DataFrame, pd.Series], float],
 ) -> ModelFitResult:
     search = RandomizedSearchCV(
         estimator=estimator,
@@ -222,7 +314,7 @@ def _run_random_search(
         n_iter=config.random_search_iter,
         cv=cv,
         n_jobs=1,
-        scoring="neg_mean_squared_error",
+        scoring=scoring,
         random_state=config.random_state,
         refit=True,
     )
@@ -233,6 +325,7 @@ def _run_random_search(
         search_type="randomized_fallback",
         cv_score=float(search.best_score_),
         model_name=model_name,
+        feature_names=list(X.columns),
     )
 
 
@@ -242,14 +335,32 @@ def fit_model(
     X_cols: list[str],
     config: StrategyConfig,
 ) -> ModelFitResult:
-    X = train_df[X_cols]
+    selected_cols = _select_elastic_net_features(train_df, X_cols, config) if model_name == "elastic_net" else X_cols
+    X = train_df[selected_cols]
     y = train_df["target_return"]
     cv = TimeSeriesSplit(n_splits=config.cv_splits)
     estimator = _make_estimator(model_name, config)
+    scoring = _make_cross_sectional_ic_scorer(train_df)
     try:
-        return _run_skopt_search(model_name=model_name, estimator=estimator, X=X, y=y, config=config, cv=cv)
+        return _run_skopt_search(
+            model_name=model_name,
+            estimator=estimator,
+            X=X,
+            y=y,
+            config=config,
+            cv=cv,
+            scoring=scoring,
+        )
     except ImportError:
-        return _run_random_search(model_name=model_name, estimator=estimator, X=X, y=y, config=config, cv=cv)
+        return _run_random_search(
+            model_name=model_name,
+            estimator=estimator,
+            X=X,
+            y=y,
+            config=config,
+            cv=cv,
+            scoring=scoring,
+        )
 
 
 def score_predictions(actual: pd.Series, predicted: pd.Series) -> Dict[str, float]:
@@ -271,7 +382,11 @@ def predict_cross_section(
     X_cols: list[str],
 ) -> Tuple[np.ndarray, pd.DataFrame]:
     preds = estimator.predict(test_df[X_cols])
-    out = test_df[["date", "asset", "target_return", "close", "asset_vol", "beta_btc", "beta_eth"]].copy()
+    output_columns = ["date", "asset", "target_return", "close", "asset_vol"]
+    for optional_column in ["beta_btc", "beta_eth", "market_forward_return"]:
+        if optional_column in test_df.columns:
+            output_columns.append(optional_column)
+    out = test_df[output_columns].copy()
     out["prediction"] = preds
     return preds, out
 

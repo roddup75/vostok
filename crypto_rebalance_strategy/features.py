@@ -223,4 +223,8 @@ def build_feature_frame(market_data: pd.DataFrame, config: StrategyConfig) -> pd
 
 
 def get_feature_columns(config: StrategyConfig) -> List[str]:
+    if config.asset_class == "equity":
+        from .equity_prediction import get_equity_feature_columns
+
+        return get_equity_feature_columns()
     return _feature_columns(config)

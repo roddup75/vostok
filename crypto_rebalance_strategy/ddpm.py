@@ -107,9 +107,21 @@ class ConditionalTabularDDPMRegressor(BaseEstimator, RegressorMixin):
         y = np.asarray(y, dtype=np.float32).reshape(-1, 1)
         self.x_dim_ = X.shape[1]
         x_aug = np.concatenate([np.ones((X.shape[0], 1), dtype=np.float32), X], axis=1)
-        ridge = self.ridge_alpha * np.eye(x_aug.shape[1], dtype=np.float32)
-        ridge[0, 0] = 0.0
-        self.linear_coef_ = np.linalg.solve(x_aug.T @ x_aug + ridge, x_aug.T @ y).astype(np.float32)
+        x_aug64 = x_aug.astype(np.float64)
+        y64 = y.astype(np.float64)
+        xtx = x_aug64.T @ x_aug64
+        xty = x_aug64.T @ y64
+        alpha = max(float(self.ridge_alpha), 0.0)
+        for _ in range(8):
+            ridge = alpha * np.eye(x_aug64.shape[1], dtype=np.float64)
+            ridge[0, 0] = 0.0
+            try:
+                self.linear_coef_ = np.linalg.solve(xtx + ridge, xty).astype(np.float32)
+                break
+            except np.linalg.LinAlgError:
+                alpha = 1e-8 if alpha == 0.0 else alpha * 10.0
+        else:
+            self.linear_coef_ = np.linalg.lstsq(xtx + ridge, xty, rcond=None)[0].astype(np.float32)
         baseline = x_aug @ self.linear_coef_
         residual = y - baseline
         self.residual_mean_ = float(residual.mean())
