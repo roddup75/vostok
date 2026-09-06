@@ -42,6 +42,8 @@ def _make_elastic_pipeline(config: StrategyConfig) -> Pipeline:
             (
                 "model",
                 ElasticNet(
+                    alpha=config.elastic_net_alpha,
+                    l1_ratio=config.elastic_net_l1_ratio,
                     max_iter=config.elastic_net_max_iter,
                     fit_intercept=True,
                     random_state=config.random_state,
@@ -329,6 +331,23 @@ def _run_random_search(
     )
 
 
+def _fit_default_estimator(
+    model_name: str,
+    estimator: Any,
+    X: pd.DataFrame,
+    y: pd.Series,
+) -> ModelFitResult:
+    estimator.fit(X, y)
+    return ModelFitResult(
+        best_estimator=estimator,
+        best_params={},
+        search_type="configured_default",
+        cv_score=float("nan"),
+        model_name=model_name,
+        feature_names=list(X.columns),
+    )
+
+
 def fit_model(
     model_name: str,
     train_df: pd.DataFrame,
@@ -341,6 +360,18 @@ def fit_model(
     cv = TimeSeriesSplit(n_splits=config.cv_splits)
     estimator = _make_estimator(model_name, config)
     scoring = _make_cross_sectional_ic_scorer(train_df)
+    if config.bayes_iter == 0 and config.random_search_iter == 0:
+        return _fit_default_estimator(model_name=model_name, estimator=estimator, X=X, y=y)
+    if config.bayes_iter == 0:
+        return _run_random_search(
+            model_name=model_name,
+            estimator=estimator,
+            X=X,
+            y=y,
+            config=config,
+            cv=cv,
+            scoring=scoring,
+        )
     try:
         return _run_skopt_search(
             model_name=model_name,

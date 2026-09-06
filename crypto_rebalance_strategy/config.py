@@ -72,6 +72,8 @@ class StrategyConfig:
     beta_window: int = 60
     position_vol_window: int = 20
     elastic_net_max_iter: int = 10000
+    elastic_net_alpha: float = 1e-4
+    elastic_net_l1_ratio: float = 0.50
     elastic_net_feature_pruning: bool = True
     elastic_net_max_features: int = 35
     elastic_net_min_features: int = 15
@@ -121,12 +123,18 @@ class StrategyConfig:
             raise ValueError("position_vol_window must be greater than 1")
         if self.elastic_net_max_features <= 0 or self.elastic_net_min_features <= 0:
             raise ValueError("elastic-net feature limits must be positive")
+        if self.elastic_net_alpha <= 0:
+            raise ValueError("elastic_net_alpha must be positive")
+        if not 0.0 <= self.elastic_net_l1_ratio <= 1.0:
+            raise ValueError("elastic_net_l1_ratio must be in [0, 1]")
         if self.elastic_net_min_features > self.elastic_net_max_features:
             raise ValueError("elastic_net_min_features cannot exceed elastic_net_max_features")
         if self.elastic_net_min_feature_dates <= 0:
             raise ValueError("elastic_net_min_feature_dates must be positive")
         if not 0.0 < self.elastic_net_feature_corr_threshold <= 1.0:
             raise ValueError("elastic_net_feature_corr_threshold must be in (0, 1]")
+        if self.bayes_iter < 0 or self.random_search_iter < 0:
+            raise ValueError("bayes_iter and random_search_iter must be non-negative")
         if self.ddpm_timesteps <= 1:
             raise ValueError("ddpm_timesteps must be greater than 1")
         if self.ddpm_epochs <= 0 or self.ddpm_batch_size <= 0:
